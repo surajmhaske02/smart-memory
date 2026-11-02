@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+import threading
+from collections import OrderedDict
 from typing import Callable, List, Optional, Protocol, Sequence, runtime_checkable
 
 from .text import tokenize
@@ -114,6 +116,46 @@ class FunctionEmbedder:
                     raise ValueError(f"Embedder {self.name!r} returned dim {len(v)}, expected {self.dim}")
                 out.append(normalize([float(x) for x in v]))
         return out
+
+
+class CachedEmbedder:
+    """LRU cache in front of any embedder. ``Memory`` adds one automatically.
+
+    Repeated queries, re-added content and duplicates inside a batch cost one model call
+    (or none). With paid embedding APIs this is a direct cost saving.
+    """
+
+    def __init__(self, inner: Embedder, maxsize: int = 4096) -> None:
+        self.inner = inner
+        self.name = inner.name
+        self.dim = inner.dim
+        self.maxsize = maxsize
+        self._cache: OrderedDict[str, Vector] = OrderedDict()
+        self._lock = threading.Lock()
+        self.hits = self.misses = self.calls = 0
+
+    def embed(self, texts: Sequence[str]) -> List[Vector]:
+        texts = list(texts)
+        found: dict = {}
+        with self._lock:
+            for text in texts:
+                if text in self._cache:
+                    self._cache.move_to_end(text)
+                    found[text] = self._cache[text]
+        missing = list(dict.fromkeys(t for t in texts if t not in found))
+        if missing:
+            vectors = self.inner.embed(missing)
+            with self._lock:
+                self.calls += 1
+                for text, vec in zip(missing, vectors):
+                    found[text] = vec
+                    self._cache[text] = vec
+                while len(self._cache) > self.maxsize:
+                    self._cache.popitem(last=False)
+        with self._lock:
+            self.misses += len(missing)
+            self.hits += len(texts) - len(missing)
+        return [list(found[t]) for t in texts]
 
 
 class SentenceTransformerEmbedder:

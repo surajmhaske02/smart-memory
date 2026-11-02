@@ -86,7 +86,7 @@ class KnowledgeGraph:
     def relations(self, *, subject: Optional[str] = None, predicate: Optional[str] = None,
                   obj: Optional[str] = None, entity: Optional[str] = None) -> List[Relation]:
         out = []
-        for record in self._memory._query(memory_types=[MemoryType.SEMANTIC], kinds=["relation"]):
+        for record in self._memory._active(kinds=["relation"], memory_types=[MemoryType.SEMANTIC]):
             rel = self._to_relation(record)
             if subject is not None and norm(rel.subject) != norm(subject):
                 continue
@@ -191,7 +191,7 @@ class Glossary:
         return None
 
     def terms(self) -> List[Term]:
-        records = self._memory._query(memory_types=[MemoryType.SEMANTIC], kinds=["definition"])
+        records = self._memory._active(kinds=["definition"], memory_types=[MemoryType.SEMANTIC])
         return [self._to_term(r) for r in records if r.metadata.get("glossary")]
 
     def remove(self, term: str) -> bool:

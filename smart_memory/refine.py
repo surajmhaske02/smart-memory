@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Callable, List, Optional, Sequence
 
 from .embeddings import cosine
 from .retrieval import DAY
+from .text import same_specifics
 from .types import MemoryRecord, MemoryType, Status
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -73,8 +74,8 @@ class Refiner:
         survivors: List[MemoryRecord] = []
         for record in sorted(records, key=lambda r: r.created_at, reverse=True):  # newest first
             twin = next((s for s in survivors if s.memory_type == record.memory_type and s.embedding
-                         and record.embedding and cosine(s.embedding, record.embedding) >= self.dedupe_threshold),
-                        None)
+                         and record.embedding and cosine(s.embedding, record.embedding) >= self.dedupe_threshold
+                         and same_specifics(s.content, record.content)), None)
             if twin is None:
                 survivors.append(record)
                 continue
@@ -82,8 +83,7 @@ class Refiner:
             twin.access_count += record.access_count
             twin.metadata.setdefault("merged_from", []).append(record.id)
             record.status, record.superseded_by = Status.SUPERSEDED, twin.id
-            memory._store.update(twin, memory.scope)
-            memory._store.update(record, memory.scope)
+            memory._persist(twin, record)
             report.merged.append(record.id)
         return survivors
 
@@ -97,7 +97,7 @@ class Refiner:
             if (record.memory_type in self.decay_types and age_days >= self.min_age_days
                     and record.importance < self.keep_importance and strength < self.archive_below):
                 record.status = Status.ARCHIVED
-                memory._store.update(record, memory.scope)
+                memory._persist(record)
                 report.archived.append(record.id)
             else:
                 kept.append(record)
@@ -126,5 +126,5 @@ class Refiner:
                                  metadata={"source_ids": [r.id for r in cluster]})
             for episode in cluster:
                 episode.metadata["promoted_to"] = insight.id
-                memory._store.update(episode, memory.scope)
+            memory._persist(*cluster)
             report.promoted.append(insight.id)

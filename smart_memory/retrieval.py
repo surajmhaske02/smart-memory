@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import math
 from collections import Counter
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from .embeddings import cosine
-from .text import tokenize
+from .index import ScopeIndex
 from .types import MemoryRecord, MemoryType, SearchResult
 
 DAY = 86_400.0
@@ -19,7 +19,8 @@ class RetrievalConfig:
     """Weights for the final score. Relevance (semantic/keyword) gates; the rest re-ranks.
 
     ``min_relevance`` drops candidates whose best relevance signal is below it, so an
-    important-but-unrelated memory never sneaks into a prompt.
+    important-but-unrelated memory never sneaks into a prompt. ``relative_cutoff`` trims
+    the weak tail of a result list, which saves prompt tokens.
     """
 
     semantic_weight: float = 0.55
@@ -28,6 +29,8 @@ class RetrievalConfig:
     importance_weight: float = 0.10
     reuse_weight: float = 0.02
     min_relevance: float = 0.12
+    relative_cutoff: float = 0.0  # e.g. 0.5 drops results scoring under half of the best one
+    cutoff_exempt_types: Tuple[MemoryType, ...] = (MemoryType.PROCEDURAL,)
     dedupe_threshold: float = 0.97
     half_life_days: Dict[MemoryType, float] = field(default_factory=lambda: {
         MemoryType.EPISODIC: 14.0,
@@ -77,18 +80,41 @@ class HybridRetriever:
         self.config = config or RetrievalConfig()
 
     def rank(self, query: str, query_vec: Optional[Sequence[float]], candidates: Sequence[MemoryRecord],
-             now: float, top_k: int = 5, min_relevance: Optional[float] = None) -> List[SearchResult]:
+             now: float, top_k: int = 5, min_relevance: Optional[float] = None,
+             relative_cutoff: Optional[float] = None) -> List[SearchResult]:
+        """Rank an ad-hoc list of records (builds a throwaway index)."""
+        dim = len(query_vec) if query_vec else 0
+        clones = [replace(c, metadata=copy.deepcopy(c.metadata)) for c in candidates]
+        index = ScopeIndex.build(clones, dim, use_numpy=False)
+        return self.rank_index(query, query_vec, index, now, top_k, min_relevance, relative_cutoff)
+
+    def rank_index(self, query: str, query_vec: Optional[Sequence[float]], index: ScopeIndex, now: float,
+                   top_k: int = 5, min_relevance: Optional[float] = None,
+                   relative_cutoff: Optional[float] = None,
+                   allow: Optional[Callable[[MemoryRecord], bool]] = None) -> List[SearchResult]:
+        """Score only the documents that can pass the relevance gate, then re-rank them.
+
+        Returned records are copies (with embeddings), safe for callers to mutate.
+        """
         cfg = self.config
         threshold = cfg.min_relevance if min_relevance is None else min_relevance
-        if not candidates:
+        cutoff = cfg.relative_cutoff if relative_cutoff is None else relative_cutoff
+        if not len(index):
             return []
-        keyword = bm25_scores(tokenize(query), [tokenize(self._index_text(c)) for c in candidates])
+        semantic = index.similarities(query_vec, floor=threshold)
+        keyword = index.bm25(query)
+        slots = set(semantic) | {s for s, kw in keyword.items() if kw >= threshold}
 
-        results: List[SearchResult] = []
-        for record, kw in zip(candidates, keyword):
-            sem = max(0.0, cosine(query_vec, record.embedding)) if query_vec and record.embedding else 0.0
-            relevance = max(sem, kw)
-            if relevance < threshold:
+        scored: List[Tuple[float, int, Dict[str, float]]] = []
+        for slot in slots:
+            record = index.record(slot)
+            if allow is not None and not allow(record):
+                continue
+            sem = semantic.get(slot)
+            if sem is None:
+                sem = index.similarity(slot, query_vec) if query_vec else 0.0
+            kw = keyword.get(slot, 0.0)
+            if max(sem, kw) < threshold:
                 continue
             signals = {
                 "semantic": sem,
@@ -99,25 +125,25 @@ class HybridRetriever:
             }
             score = (cfg.semantic_weight * sem + cfg.keyword_weight * kw + cfg.recency_weight * signals["recency"]
                      + cfg.importance_weight * record.importance + cfg.reuse_weight * signals["reuse"])
-            results.append(SearchResult(record=record, score=score, signals=signals))
+            scored.append((score, slot, signals))
 
-        results.sort(key=lambda r: r.score, reverse=True)
-        return self._dedupe(results, top_k)
-
-    @staticmethod
-    def _index_text(record: MemoryRecord) -> str:
-        extra = record.metadata.get("search_text")
-        return f"{record.content} {extra}" if extra else record.content
-
-    def _dedupe(self, ranked: List[SearchResult], top_k: int) -> List[SearchResult]:
-        """Skip results nearly identical to a higher-ranked one, so k slots carry k distinct facts."""
-        kept: List[SearchResult] = []
-        for result in ranked:
-            emb = result.record.embedding
-            if emb and any(k.record.embedding and cosine(emb, k.record.embedding) >= self.config.dedupe_threshold
-                           for k in kept):
+        scored.sort(key=lambda t: (-t[0], t[1]))
+        kept: List[Tuple[float, int, Dict[str, float]]] = []
+        best = scored[0][0] if scored else 0.0
+        for item in scored:
+            # Rules and procedures are rare and costly to miss, so the cutoff never drops them.
+            if cutoff and item[0] < cutoff * best \
+                    and index.record(item[1]).memory_type not in cfg.cutoff_exempt_types:
                 continue
-            kept.append(result)
+            # Skip near-copies of a higher-ranked result so k slots carry k distinct facts.
+            if any(index.pair_similarity(item[1], k[1]) >= cfg.dedupe_threshold for k in kept):
+                continue
+            kept.append(item)
             if len(kept) >= top_k:
                 break
-        return kept
+        results = []
+        for score, slot, signals in kept:
+            record = index.record(slot)
+            out = replace(record, metadata=copy.deepcopy(record.metadata), embedding=index.vector(slot))
+            results.append(SearchResult(record=out, score=score, signals=signals))
+        return results

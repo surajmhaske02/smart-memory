@@ -19,5 +19,7 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check smart_memory tests
       - run: pytest --cov=smart_memory --cov-report=term-missing
+      - name: Test again with the numpy fast path
+        run: pip install numpy && pytest -q
       - run: python examples/quickstart.py
       - run: python benchmarks/benchmark.py --per-user 200

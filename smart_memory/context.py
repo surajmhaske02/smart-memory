@@ -42,25 +42,33 @@ class ContextCard:
         return not any(s.lines for s in self.sections)
 
     def render(self, fmt: str = "markdown") -> str:
+        stable, dynamic = self.render_split(fmt)
+        return "\n".join(p for p in (stable, dynamic) if p)
+
+    def render_split(self, fmt: str = "markdown") -> Tuple[str, str]:
+        """``(stable, dynamic)`` halves of :meth:`render`, joined by a newline.
+
+        ``stable`` holds the header and pinned Profile, which only change when pinned
+        memories change. Put it right after your system prompt and before the per-query
+        part so provider prompt caching (billed at a fraction of normal input) covers it.
+        """
+        if fmt not in ("markdown", "xml"):
+            raise ValueError("fmt must be 'markdown' or 'xml'")
         sections = [s for s in self.sections if s.lines]
         if not sections:
-            return ""
-        if fmt == "xml":
-            parts = ["<memory>"]
-            for s in sections:
-                tag = s.title.lower().replace(" & ", "_").replace(" ", "_")
-                parts.append(f"<{tag}>")
-                parts.extend(escape(line, quote=False) for line in s.lines)
-                parts.append(f"</{tag}>")
-            parts.append("</memory>")
-            return "\n".join(parts)
-        if fmt != "markdown":
-            raise ValueError("fmt must be 'markdown' or 'xml'")
-        parts = ["## Memory"]
+            return "", ""
+        head, tail = ("<memory>", "</memory>") if fmt == "xml" else ("## Memory", "")
+        stable_parts, dynamic_parts = [head], []
         for s in sections:
-            parts.append(f"### {s.title}")
-            parts.extend(f"- {line}" for line in s.lines)
-        return "\n".join(parts)
+            target = stable_parts if s.title == PROFILE else dynamic_parts
+            if fmt == "xml":
+                tag = s.title.lower().replace(" & ", "_").replace(" ", "_")
+                target.extend([f"<{tag}>", *(escape(line, quote=False) for line in s.lines), f"</{tag}>"])
+            else:
+                target.extend([f"### {s.title}", *(f"- {line}" for line in s.lines)])
+        if tail:
+            dynamic_parts.append(tail)
+        return "\n".join(stable_parts), "\n".join(dynamic_parts)
 
     def __str__(self) -> str:
         return self.render()
@@ -73,6 +81,9 @@ class ContextCard:
         }
 
 
+PROFILE = "Profile"
+
+
 def _ago(seconds: float) -> str:
     seconds = max(0.0, seconds)
     for unit, size in (("d", 86_400), ("h", 3_600), ("m", 60)):
@@ -82,20 +93,32 @@ def _ago(seconds: float) -> str:
 
 
 class ContextBuilder:
-    def __init__(self, token_counter: Callable[[str], int] = estimate_tokens, max_line_chars: int = 400) -> None:
+    """Builds Context Cards.
+
+    Args:
+        token_counter: ``fn(text) -> int``; pass your model's tokenizer for exact budgets.
+        max_line_chars: Long memories are truncated to this many characters.
+        relative_cutoff: Drop retrieved memories scoring below this fraction of the best
+            match. Trims weak, token-wasting tail results (0 disables). Procedural memories
+            are exempt (see ``RetrievalConfig.cutoff_exempt_types``).
+    """
+
+    def __init__(self, token_counter: Callable[[str], int] = estimate_tokens, max_line_chars: int = 400,
+                 relative_cutoff: float = 0.5) -> None:
         self.count = token_counter
         self.max_line_chars = max_line_chars
+        self.relative_cutoff = relative_cutoff
 
     def build(self, memory: ScopedMemory, query: str, *, max_tokens: int = 800, k: int = 12,
               graph_depth: int = 1, recent_turns: int = 0, include_working: bool = True,
               memory_types: Optional[Sequence[MemoryType]] = None,
-              min_relevance: Optional[float] = None) -> ContextCard:
+              min_relevance: Optional[float] = None, relative_cutoff: Optional[float] = None) -> ContextCard:
         now = memory._now()
         # Priority order: the budget is spent top to bottom.
-        titles = ["Current state", "Definitions", "Procedures & instructions", "Facts", "Past events",
+        titles = [PROFILE, "Current state", "Definitions", "Procedures & instructions", "Facts", "Past events",
                   "Recent conversation"]
         items: Dict[str, List[Tuple[str, Optional[str]]]] = {t: [] for t in titles}
-        state, definitions, procedures, facts, events, conversation = titles
+        profile, state, definitions, procedures, facts, events, conversation = titles
         seen: set = set()
 
         def put(section: str, line: str, record_id: Optional[str] = None) -> None:
@@ -104,6 +127,10 @@ class ContextBuilder:
                     return
                 seen.add(record_id)
             items[section].append((truncate(line, self.max_line_chars), record_id))
+
+        pinned = [r for r in memory._active() if r.metadata.get("pinned")]
+        for record in sorted(pinned, key=lambda r: (r.created_at, r.id)):  # deterministic: cache-friendly
+            put(profile, record.content, record.id)
 
         if include_working:
             for key, value in memory.working.scratch.items():
@@ -119,22 +146,27 @@ class ContextBuilder:
             for rel in memory.graph.facts_about(entity, depth=graph_depth, limit=10):
                 put(facts, rel.sentence, rel.id)
 
+        cutoff = self.relative_cutoff if relative_cutoff is None else relative_cutoff
         results: List[SearchResult] = memory._search(query, k=k, memory_types=memory_types,
-                                                     min_relevance=min_relevance, touch=False)
+                                                     min_relevance=min_relevance, relative_cutoff=cutoff,
+                                                     touch=False)
         for result in results:
             record = result.record
             if record.memory_type == MemoryType.PROCEDURAL:
                 put(procedures, self._procedure_line(record), record.id)
             elif record.memory_type == MemoryType.EPISODIC:
                 tag = f"[{record.kind}] " if record.kind == "failure" else ""
-                put(events, f"({_ago(now - record.created_at)}) {tag}{record.content}", record.id)
+                seen_at = record.metadata.get("last_seen", record.created_at)
+                times = int(record.metadata.get("occurrences", 1))
+                repeat = f" (x{times})" if times > 1 else ""
+                put(events, f"({_ago(now - seen_at)}) {tag}{record.content}{repeat}", record.id)
             elif record.kind == "definition" and record.metadata.get("glossary"):
                 put(definitions, f"{record.content}", record.id)
             else:
                 put(facts, record.content, record.id)
 
         card = self._fit(query, items, max_tokens, entities)
-        memory._store.touch(card.memory_ids, now)
+        memory._mem._touch(card.memory_ids, now)
         memory._traces.log("context", memory.scope, query=query, memory_ids=card.memory_ids,
                            token_estimate=card.token_estimate, truncated=card.truncated)
         return card

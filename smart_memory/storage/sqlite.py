@@ -80,6 +80,7 @@ class SQLiteStore(StorageBackend):
     def __init__(self, path: str = ":memory:") -> None:
         self.path = path
         self._lock = threading.RLock()
+        self._writes = 0
         self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         if path != ":memory:":
@@ -112,6 +113,7 @@ class SQLiteStore(StorageBackend):
             try:
                 self._conn.execute(f"INSERT INTO memories ({','.join(_COLUMNS)}) VALUES ({placeholders})",
                                    self._record_values(record))
+                self._writes += 1
             except sqlite3.IntegrityError as exc:
                 raise ValueError(f"Duplicate memory id {record.id}") from exc
 
@@ -123,6 +125,7 @@ class SQLiteStore(StorageBackend):
                 self._conn.executemany(f"INSERT INTO memories ({','.join(_COLUMNS)}) VALUES ({placeholders})",
                                        [self._record_values(r) for r in records])
                 self._conn.execute("COMMIT")
+                self._writes += 1
             except sqlite3.IntegrityError as exc:
                 self._conn.execute("ROLLBACK")
                 raise ValueError("Duplicate memory id in batch") from exc
@@ -152,12 +155,14 @@ class SQLiteStore(StorageBackend):
             if not self._check_owner(record.id, scope):
                 raise KeyError(record.id)
             self._conn.execute(f"UPDATE memories SET {assignments} WHERE id = ?", [*values[1:], record.id])
+            self._writes += 1
 
     def delete(self, record_id: str, scope: Scope) -> bool:
         with self._lock:
             if not self._check_owner(record_id, scope):
                 return False
             self._conn.execute("DELETE FROM memories WHERE id = ?", [record_id])
+            self._writes += 1
             return True
 
     def query(self, scope: Scope, *, memory_types: Optional[Sequence[MemoryType]] = None,
@@ -204,6 +209,12 @@ class SQLiteStore(StorageBackend):
                 "UPDATE memories SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?",
                 [(timestamp, rid) for rid in record_ids],
             )
+
+    def generation(self) -> tuple:
+        # data_version changes when *another* connection (process) commits, so external
+        # writers invalidate the in-process index too.
+        with self._lock:
+            return self._writes, self._conn.execute("PRAGMA data_version").fetchone()[0]
 
     def iter_all(self) -> Iterator[MemoryRecord]:
         with self._lock:

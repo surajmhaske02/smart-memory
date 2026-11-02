@@ -11,27 +11,28 @@ Quick start::
 """
 
 from .context import ContextBuilder, ContextCard
-from .embeddings import Embedder, FunctionEmbedder, HashingEmbedder, SentenceTransformerEmbedder
+from .embeddings import CachedEmbedder, Embedder, FunctionEmbedder, HashingEmbedder, SentenceTransformerEmbedder
 from .memory import EmbedderMismatchError, Memory, ScopedMemory
 from .ontology import Glossary, KnowledgeGraph, Relation, Term
 from .refine import Refiner, RefineReport
 from .retrieval import HybridRetriever, RetrievalConfig
 from .router import CallableRouter, Router, RuleRouter
 from .storage import InMemoryStore, PermissionDenied, SQLiteStore, StorageBackend
+from .tools import MemoryTools
 from .traces import TraceLog
 from .types import MemoryRecord, MemoryType, RoutingDecision, Scope, SearchResult, Status
 from .working import WorkingMemory
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Memory", "ScopedMemory", "EmbedderMismatchError",
     "MemoryType", "MemoryRecord", "Scope", "SearchResult", "RoutingDecision", "Status",
-    "Embedder", "HashingEmbedder", "FunctionEmbedder", "SentenceTransformerEmbedder",
+    "Embedder", "HashingEmbedder", "FunctionEmbedder", "SentenceTransformerEmbedder", "CachedEmbedder",
     "Router", "RuleRouter", "CallableRouter",
     "StorageBackend", "SQLiteStore", "InMemoryStore", "PermissionDenied",
     "HybridRetriever", "RetrievalConfig", "ContextBuilder", "ContextCard",
     "KnowledgeGraph", "Glossary", "Relation", "Term",
-    "Refiner", "RefineReport", "TraceLog", "WorkingMemory",
+    "Refiner", "RefineReport", "TraceLog", "WorkingMemory", "MemoryTools",
     "__version__",
 ]

@@ -71,13 +71,35 @@ def test_search_filters_by_type_and_kind(alice):
     assert [r.record.kind for r in alice.search("refund", kinds=["failure"])] == ["failure"]
 
 
-def test_recency_breaks_ties(alice, clock):
+def test_write_dedupe_reinforces_instead_of_duplicating(alice, clock):
     old = alice.add("Deploy to production failed", "episodic")
-    clock.advance(days=60)
-    new = alice.add("Deploy to production failed", "episodic", metadata={"n": 2})
-    ids = [r.id for r in alice.search("deploy production failed", k=2)]
-    assert ids[0] == new.id
-    assert old.id not in ids  # identical text is deduplicated in results
+    clock.advance(days=2)
+    again = alice.add("Deploy to production failed", "episodic", metadata={"n": 2})
+    assert again.id == old.id and len(alice.all()) == 1
+    got = alice.get(old.id)
+    assert got.metadata["occurrences"] == 2 and got.metadata["n"] == 2
+    assert got.metadata["last_seen"] == got.updated_at == clock.now
+    assert "Deploy to production failed (x2)" in alice.context("deploy failed").render()
+    alice.add("Deploy to production failed", "semantic")  # other type: stored separately
+    assert len(alice.all()) == 2
+
+
+def test_write_dedupe_within_one_batch(alice):
+    records = alice.add_many(["Backup job failed", "Backup job failed", "Alice likes tea"])
+    assert records[0].id == records[1].id and len(alice.all()) == 2
+    assert alice.get(records[0].id).metadata["occurrences"] == 2
+
+
+def test_recency_breaks_ties(clock):
+    with Memory(clock=clock, dedupe_on_write=None) as m:
+        s = m.scope("alice")
+        old = s.add("Deploy to production failed", "episodic")
+        clock.advance(days=60)
+        new = s.add("Deploy to production failed", "episodic", metadata={"n": 2})
+        assert len(s.all()) == 2
+        ids = [r.id for r in s.search("deploy production failed", k=2)]
+        assert ids[0] == new.id
+        assert old.id not in ids  # identical text is deduplicated in results
 
 
 def test_importance_breaks_ties(alice):

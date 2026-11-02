@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-memory"
-version = "0.1.0"
+version = "0.2.0"
 description = "Governed, four-store memory for AI agents: retain, recall, reuse, refine."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -22,6 +22,7 @@ dependencies = []
 
 [project.optional-dependencies]
 local = ["sentence-transformers>=2.2"]
+fast = ["numpy>=1.21"]
 dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.4"]
 
 [tool.setuptools.packages.find]

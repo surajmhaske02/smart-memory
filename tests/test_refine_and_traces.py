@@ -3,7 +3,9 @@ import json
 from smart_memory import Memory, MemoryType, Refiner, Status
 
 
-def test_dedupe_keeps_newest_and_merges_signals(alice, clock):
+def test_dedupe_keeps_newest_and_merges_signals(clock):
+    m = Memory(clock=clock, dedupe_on_write=None)  # let refine() do the merging
+    alice = m.scope("alice", "support")
     old = alice.add("Alice prefers email over phone calls", importance=0.9)
     alice.search("email")  # access_count 1 on old
     clock.advance(days=1)
@@ -16,6 +18,7 @@ def test_dedupe_keeps_newest_and_merges_signals(alice, clock):
     assert survivor.metadata["merged_from"] == [old.id]
     assert alice.get(old.id).status == Status.SUPERSEDED
     assert alice.get(other.id).status == Status.ACTIVE
+    assert [r.id for r in alice.search("prefers email phone")] == [new.id]  # warm index saw the merge
 
 
 def test_decay_archives_stale_unimportant_episodes_only(alice, clock):

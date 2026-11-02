@@ -63,6 +63,14 @@ class StorageBackend(ABC):
     def touch(self, record_ids: Sequence[str], timestamp: float) -> None:
         """Bump access_count and last_accessed_at (the "reuse" signal)."""
 
+    def generation(self) -> Optional[Any]:
+        """A token that changes whenever stored records change (``touch`` excluded).
+
+        ``Memory`` uses it to keep a warm in-process search index. Return ``None`` (the
+        default) to disable that cache, e.g. for a backend shared with writers you can't observe.
+        """
+        return None
+
     @abstractmethod
     def iter_all(self) -> Iterator[MemoryRecord]:
         """Every record regardless of scope. Admin/maintenance use only (re-embedding, export)."""

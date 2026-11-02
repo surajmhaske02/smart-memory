@@ -20,6 +20,7 @@ alice.add_procedure(
     ["Confirm order number", "Check the refund window", "Call refund API with retry + backoff"],
     when="customer asks for money back",
 )
+alice.add("Alice is a premium customer", pin=True)  # always opens the Context Card
 alice.add("Alice lives in Pune", key="alice.city")
 alice.add("Alice lives in Berlin", key="alice.city")  # supersedes Pune, history kept
 
@@ -38,6 +39,7 @@ for hit in alice.search("where does alice live"):
 card = alice.context("Alice wants her money back for order 4411. What's the return window?", max_tokens=400)
 print("\n" + card.render())
 print(f"\n~{card.token_estimate} tokens, {len(card.memory_ids)} memories")
+stable, dynamic = card.render_split()  # send `stable` as a cached prompt prefix
 
 # REFINE - learn from outcomes and usage.
 alice.feedback(card.memory_ids, helpful=True)
@@ -48,3 +50,4 @@ print("\n", alice.refine())
 print("sales agent sees:", mem.scope("alice", "sales").search("email phone"))
 print("bob sees:", mem.scope("bob", "support").search("Alice email"))
 print("bob still sees the org glossary:", mem.scope("bob").glossary.lookup("return window"))
+print("cache:", mem.cache_info())

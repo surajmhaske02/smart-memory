@@ -16,12 +16,14 @@ class InMemoryStore(StorageBackend):
         self._traces: List[Dict[str, Any]] = []
         self._meta: Dict[str, str] = {}
         self._lock = threading.RLock()
+        self._generation = 0
 
     def add(self, record: MemoryRecord) -> None:
         with self._lock:
             if record.id in self._records:
                 raise ValueError(f"Duplicate memory id {record.id}")
             self._records[record.id] = copy.deepcopy(record)
+            self._generation += 1
 
     def get(self, record_id: str, scope: Scope) -> Optional[MemoryRecord]:
         with self._lock:
@@ -36,6 +38,7 @@ class InMemoryStore(StorageBackend):
             if not scope.can_write(existing):
                 raise PermissionDenied(f"Scope {scope} cannot modify memory {record.id}")
             self._records[record.id] = copy.deepcopy(record)
+            self._generation += 1
 
     def delete(self, record_id: str, scope: Scope) -> bool:
         with self._lock:
@@ -45,6 +48,7 @@ class InMemoryStore(StorageBackend):
             if not scope.can_write(existing):
                 raise PermissionDenied(f"Scope {scope} cannot delete memory {record_id}")
             del self._records[record_id]
+            self._generation += 1
             return True
 
     def query(self, scope: Scope, *, memory_types: Optional[Sequence[MemoryType]] = None,
@@ -73,6 +77,9 @@ class InMemoryStore(StorageBackend):
                 if record:
                     record.access_count += 1
                     record.last_accessed_at = timestamp
+
+    def generation(self) -> int:
+        return self._generation
 
     def iter_all(self) -> Iterator[MemoryRecord]:
         with self._lock:

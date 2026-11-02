@@ -131,17 +131,27 @@ class CallableRouter:
     as ``"episodic"``), or a ``(memory_type, confidence)`` tuple. When ``fn`` raises, returns
     something unparseable, or its confidence is below ``min_confidence``, the ``fallback``
     router decides instead, so a flaky model never blocks a write.
+
+    ``escalate_below`` turns this into a cascade: the cheap fallback router runs first and
+    ``fn`` is only called when the fallback's confidence is below that value. With an LLM
+    router this typically removes most model calls on writes.
     """
 
     def __init__(self, fn: Callable[[str], RouterOutput], fallback: Optional[Router] = None,
-                 min_confidence: float = 0.5, name: str = "callable") -> None:
+                 min_confidence: float = 0.5, name: str = "callable",
+                 escalate_below: Optional[float] = None) -> None:
         self._fn = fn
         self.fallback = fallback or RuleRouter()
         self.min_confidence = min_confidence
         self.name = name
+        self.escalate_below = escalate_below
+        self.model_calls = 0
 
     def route(self, text: str, metadata: Optional[Mapping[str, Any]] = None) -> RoutingDecision:
         fallback = self.fallback.route(text, metadata)
+        if self.escalate_below is not None and fallback.confidence >= self.escalate_below:
+            return fallback
+        self.model_calls += 1
         try:
             out = self._fn(text)
             if isinstance(out, RoutingDecision):
