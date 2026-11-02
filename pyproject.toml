@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart-memory"
+version = "0.1.0"
+description = "Governed, four-store memory for AI agents: retain, recall, reuse, refine."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [{ name = "Suraj Mhaske" }]
+keywords = ["ai", "agents", "llm", "memory", "rag", "context-engineering", "knowledge-graph"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+local = ["sentence-transformers>=2.2"]
+dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.4"]
+
+[tool.setuptools.packages.find]
+include = ["smart_memory*"]
+
+[tool.setuptools.package-data]
+smart_memory = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["UP006", "UP007", "UP035", "UP045", "B905"]
