@@ -15,9 +15,23 @@ remembers, how it structures that memory, and whether it gets better over time.
 - **Entitlements in the data layer**: user/agent isolation is enforced inside every database query.
 - **Continual learning**: feedback, procedure outcomes, dedupe/decay/promotion, and exportable traces.
 
+## Install
+
+Not on PyPI yet. Install from GitHub (Python 3.9+, no required dependencies):
+
 ```bash
-pip install smart-memory        # zero required dependencies, Python 3.9+
+pip install "git+https://github.com/surajmhaske02/smart-memory.git"
 ```
+
+Or from a local clone, editable, with dev tools:
+
+```bash
+git clone https://github.com/surajmhaske02/smart-memory.git
+cd smart-memory
+pip install -e ".[dev]"
+```
+
+The package installs as `smart-memory` and is imported as `smart_memory`.
 
 ## Quick start
 
@@ -216,7 +230,7 @@ dependencies. It matches wording, not meaning. For paraphrase-level recall, use 
 ```python
 from smart_memory import FunctionEmbedder, SentenceTransformerEmbedder
 
-mem = Memory("agent.db", embedder=SentenceTransformerEmbedder("all-MiniLM-L6-v2"))  # pip install smart-memory[local]
+mem = Memory("agent.db", embedder=SentenceTransformerEmbedder("all-MiniLM-L6-v2"))  # pip install sentence-transformers
 
 def embed(texts):                       # any provider
     return [d.embedding for d in client.embeddings.create(model="...", input=texts).data]

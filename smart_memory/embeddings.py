@@ -117,14 +117,14 @@ class FunctionEmbedder:
 
 
 class SentenceTransformerEmbedder:
-    """Local neural embeddings via ``sentence-transformers`` (``pip install smart-memory[local]``)."""
+    """Local neural embeddings via ``sentence-transformers`` (``pip install sentence-transformers``)."""
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2", device: Optional[str] = None) -> None:
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise ImportError(
-                "SentenceTransformerEmbedder needs sentence-transformers: pip install 'smart-memory[local]'"
+                "SentenceTransformerEmbedder needs sentence-transformers: pip install sentence-transformers"
             ) from exc
         self._model = SentenceTransformer(model_name, device=device)
         self.dim = int(self._model.get_sentence_embedding_dimension())
