@@ -3,7 +3,7 @@
 **Long-term memory for AI agents that uses up to 99% fewer prompt tokens, runs offline, and keeps every user's data separate.**
 
 [![CI](https://github.com/surajmhaske02/smart-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/surajmhaske02/smart-memory/actions/workflows/ci.yml)
-![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-green)
 

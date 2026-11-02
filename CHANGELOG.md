@@ -18,6 +18,7 @@ Cost and speed release. See `docs/OPTIMIZATION.md` for measurements.
   Procedural memories are exempt.
 - `MemoryTools`: remember/recall/forget function-calling schemas (Anthropic, OpenAI, JSON) and a dispatcher.
 - `StorageBackend.generation()` (optional) lets custom backends opt into the warm index.
+- Minimum Python is now 3.10 (3.9 is end-of-life and no longer on GitHub's runners). CI covers 3.10-3.14.
 
 ## 0.1.0 - 2026-11-03
 

@@ -7,7 +7,7 @@ name = "smart-memory"
 version = "0.2.0"
 description = "Governed, four-store memory for AI agents: retain, recall, reuse, refine."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Suraj Mhaske" }]
 keywords = ["ai", "agents", "llm", "memory", "rag", "context-engineering", "knowledge-graph"]
@@ -36,7 +36,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
