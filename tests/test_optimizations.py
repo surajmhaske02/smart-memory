@@ -225,8 +225,8 @@ def test_default_builder_cutoff_is_configurable(clock):
 
 def test_tool_schemas_formats(alice):
     tools = MemoryTools(alice)
-    assert tools.names == ["remember", "recall"]
-    assert [t["name"] for t in tools.schemas("anthropic")] == ["remember", "recall"]
+    assert tools.names == ["remember", "recall", "context"]
+    assert [t["name"] for t in tools.schemas("anthropic")] == ["remember", "recall", "context"]
     assert "input_schema" in tools.schemas("anthropic")[0]
     openai = tools.schemas("openai")[0]
     assert openai["type"] == "function" and openai["function"]["parameters"]["required"] == ["content"]

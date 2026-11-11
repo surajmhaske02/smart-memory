@@ -4,6 +4,7 @@
     request(tools=tools.schemas("anthropic"))      # or "openai", or "json" for Gemini-style declarations
     result = tools.handle(call.name, call.arguments)  # returns a JSON string for the tool result
 
+Tools: ``remember``, ``recall``, ``context`` and (opt-in) ``forget``.
 ``forget`` is off by default: enable it only if the model should be able to delete memories.
 """
 
@@ -50,6 +51,20 @@ _SPECS: List[Dict[str, Any]] = [
             "properties": {
                 "query": {"type": "string", "description": "What to look for, in natural language."},
                 "k": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Max results (default 5)."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "context",
+        "description": "Get a compact, ready-to-read summary of everything memory knows that is relevant to a "
+                       "question: profile, definitions, rules, facts and past events. Use at the start of a task.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The question or task."},
+                "max_tokens": {"type": "integer", "minimum": 50, "maximum": 4000,
+                               "description": "Size budget (default 600)."},
             },
             "required": ["query"],
         },
@@ -107,6 +122,10 @@ class MemoryTools:
         hits = self.memory.search(query, k=k)
         return {"results": [{"id": h.id, "content": h.content, "memory_type": h.record.memory_type.value,
                              "score": round(h.score, 3)} for h in hits]}
+
+    def _context(self, query: str, max_tokens: int = 600) -> Dict[str, Any]:
+        card = self.memory.context(query, max_tokens=max(50, min(int(max_tokens), 4000)))
+        return {"context": card.render(), "memory_ids": card.memory_ids, "token_estimate": card.token_estimate}
 
     def _forget(self, memory_id: str) -> Dict[str, Any]:
         return {"deleted": self.memory.delete(memory_id)}

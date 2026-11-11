@@ -252,3 +252,11 @@ class SQLiteStore(StorageBackend):
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def __del__(self) -> None:  # a forgotten close() shouldn't leak the connection
+        conn = getattr(self, "_conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - interpreter shutdown
+                pass

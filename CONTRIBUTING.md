@@ -27,7 +27,8 @@ ruff check smart_memory tests
 
 1. Subclass `smart_memory.storage.StorageBackend` and implement its abstract methods.
 2. Mirror `Scope.can_see` (reads) and `Scope.can_write` (updates and deletes) in your queries.
-3. Add a factory to `tests/test_storage_contract.py` and run the suite.
+3. Add a factory to `tests/test_storage_contract.py` and run the suite. For Postgres, set
+   `SMART_MEMORY_TEST_PG_DSN`, or `pip install pgserver` for an embedded test server.
 4. Optionally implement `generation()` (a token that changes on every write) so `Memory` can keep
    a warm in-process index for your backend.
 

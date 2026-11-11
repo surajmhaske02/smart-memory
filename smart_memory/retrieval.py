@@ -81,12 +81,13 @@ class HybridRetriever:
 
     def rank(self, query: str, query_vec: Optional[Sequence[float]], candidates: Sequence[MemoryRecord],
              now: float, top_k: int = 5, min_relevance: Optional[float] = None,
-             relative_cutoff: Optional[float] = None) -> List[SearchResult]:
+             relative_cutoff: Optional[float] = None,
+             allow: Optional[Callable[[MemoryRecord], bool]] = None) -> List[SearchResult]:
         """Rank an ad-hoc list of records (builds a throwaway index)."""
         dim = len(query_vec) if query_vec else 0
         clones = [replace(c, metadata=copy.deepcopy(c.metadata)) for c in candidates]
         index = ScopeIndex.build(clones, dim, use_numpy=False)
-        return self.rank_index(query, query_vec, index, now, top_k, min_relevance, relative_cutoff)
+        return self.rank_index(query, query_vec, index, now, top_k, min_relevance, relative_cutoff, allow)
 
     def rank_index(self, query: str, query_vec: Optional[Sequence[float]], index: ScopeIndex, now: float,
                    top_k: int = 5, min_relevance: Optional[float] = None,

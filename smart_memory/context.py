@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .text import estimate_tokens, truncate
 from .types import MemoryRecord, MemoryType, SearchResult
@@ -112,7 +112,8 @@ class ContextBuilder:
     def build(self, memory: ScopedMemory, query: str, *, max_tokens: int = 800, k: int = 12,
               graph_depth: int = 1, recent_turns: int = 0, include_working: bool = True,
               memory_types: Optional[Sequence[MemoryType]] = None,
-              min_relevance: Optional[float] = None, relative_cutoff: Optional[float] = None) -> ContextCard:
+              min_relevance: Optional[float] = None, relative_cutoff: Optional[float] = None,
+              since: Any = None, until: Any = None) -> ContextCard:
         now = memory._now()
         # Priority order: the budget is spent top to bottom.
         titles = [PROFILE, "Current state", "Definitions", "Procedures & instructions", "Facts", "Past events",
@@ -128,7 +129,7 @@ class ContextBuilder:
                 seen.add(record_id)
             items[section].append((truncate(line, self.max_line_chars), record_id))
 
-        pinned = [r for r in memory._active() if r.metadata.get("pinned")]
+        pinned = memory._pinned()
         for record in sorted(pinned, key=lambda r: (r.created_at, r.id)):  # deterministic: cache-friendly
             put(profile, record.content, record.id)
 
@@ -149,7 +150,7 @@ class ContextBuilder:
         cutoff = self.relative_cutoff if relative_cutoff is None else relative_cutoff
         results: List[SearchResult] = memory._search(query, k=k, memory_types=memory_types,
                                                      min_relevance=min_relevance, relative_cutoff=cutoff,
-                                                     touch=False)
+                                                     since=since, until=until, touch=False)
         for result in results:
             record = result.record
             if record.memory_type == MemoryType.PROCEDURAL:

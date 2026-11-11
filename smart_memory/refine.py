@@ -30,10 +30,11 @@ class RefineReport:
     merged: List[str] = field(default_factory=list)
     archived: List[str] = field(default_factory=list)
     promoted: List[str] = field(default_factory=list)
+    expired: List[str] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return (f"RefineReport(examined={self.examined}, merged={len(self.merged)}, "
-                f"archived={len(self.archived)}, promoted={len(self.promoted)})")
+                f"archived={len(self.archived)}, promoted={len(self.promoted)}, expired={len(self.expired)})")
 
 
 class Refiner:
@@ -95,6 +96,7 @@ class Refiner:
             age_days = (now - record.created_at) / DAY
             strength = record.importance * recency(record, now) + min(record.access_count, 10) * 0.05
             if (record.memory_type in self.decay_types and age_days >= self.min_age_days
+                    and not record.metadata.get("pinned")  # pinned = profile / hard rules: never fade
                     and record.importance < self.keep_importance and strength < self.archive_below):
                 record.status = Status.ARCHIVED
                 memory._persist(record)

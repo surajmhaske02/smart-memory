@@ -12,15 +12,17 @@ from __future__ import annotations
 
 import copy
 import json
-import threading
 import time
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
+from ._locks import RWLock
 from .context import ContextBuilder, ContextCard
+from .contradictions import extract_slot
 from .embeddings import CachedEmbedder, Embedder, HashingEmbedder
+from .governance import Redactor, RetentionPolicy
 from .index import ScopeIndex
 from .ontology import Glossary, KnowledgeGraph, norm
 from .refine import Refiner, RefineReport, Summarizer
@@ -29,6 +31,7 @@ from .router import Router, RuleRouter
 from .storage.base import StorageBackend
 from .storage.sqlite import SQLiteStore
 from .text import same_specifics
+from .timeutil import TimeArg, to_timestamp
 from .traces import TraceLog
 from .types import DURABLE_TYPES, MemoryRecord, MemoryType, RoutingDecision, Scope, SearchResult, Status, clamp
 from .working import WorkingMemory
@@ -67,11 +70,22 @@ class Memory:
         retrieval: Ranking weights and thresholds.
         on_embedder_change: ``"error"`` (default) or ``"reembed"`` when the store was built with another embedder.
         trace: Record routing/retrieval/feedback traces for auditing and continual learning.
+        redact: ``True`` (all built-in detectors) or a :class:`Redactor` to strip personal data
+            (emails, phones, cards, Aadhaar, PAN, secrets...) before anything is stored or embedded.
+        contradictions: ``"supersede"`` (default) replaces an older single-valued fact such as
+            "Alice lives in Pune" when "Alice moved to Berlin" arrives; ``"flag"`` keeps both and
+            marks them; ``"off"`` disables detection.
+        retention: A :class:`RetentionPolicy` applied by ``refine()`` and ``apply_retention()``.
+        candidate_limit: For very large scopes on a backend with server-side ``candidates()``
+            (e.g. PostgresStore + pgvector): let the database pick this many candidates per search
+            instead of holding the whole scope in an in-process index.
         dedupe_on_write: Cosine similarity at which a new memory reinforces an existing one of the
             same type instead of being stored again (counted in ``metadata["occurrences"]``).
             ``None`` stores every write.
         embed_cache_size: LRU entries cached in front of the embedder (0 disables).
         index_cache_size: Number of user/agent search indexes kept warm in process (0 disables).
+        index_cache_max_memories: Cap on memories held across all warm indexes (bounds RAM:
+            roughly 2 KB per memory at dim 512, plus text). Least recently used indexes go first.
         clock: Time source; inject a fake clock in tests.
     """
 
@@ -79,8 +93,11 @@ class Memory:
                  embedder: Optional[Embedder] = None, router: Optional[Router] = None,
                  retrieval: Optional[RetrievalConfig] = None, context_builder: Optional[ContextBuilder] = None,
                  refiner: Optional[Refiner] = None, on_embedder_change: str = "error", trace: bool = True,
+                 redact: Union[bool, Redactor, None] = None, contradictions: str = "supersede",
+                 retention: Optional[RetentionPolicy] = None, candidate_limit: Optional[int] = None,
                  dedupe_on_write: Optional[float] = 0.97, embed_cache_size: int = 4096,
-                 index_cache_size: int = 64, clock: Callable[[], float] = time.time,
+                 index_cache_size: int = 64, index_cache_max_memories: int = 500_000,
+                 clock: Callable[[], float] = time.time,
                  working_max_turns: int = 20) -> None:
         self.store = store if store is not None else SQLiteStore(str(path))
         self.embedder: Embedder = embedder or HashingEmbedder()
@@ -91,13 +108,22 @@ class Memory:
         self.context_builder = context_builder or ContextBuilder()
         self.refiner = refiner or Refiner()
         self.dedupe_on_write = dedupe_on_write
+        if contradictions not in ("supersede", "flag", "off"):
+            raise ValueError("contradictions must be 'supersede', 'flag' or 'off'")
+        self.contradictions = contradictions
+        self.redactor: Optional[Redactor] = Redactor() if redact is True else (redact or None)
+        self.retention = retention
+        if candidate_limit is not None and not hasattr(self.store, "candidates"):
+            raise ValueError("candidate_limit needs a backend with server-side candidates(), e.g. PostgresStore")
+        self.candidate_limit = candidate_limit
         self.clock = clock
         self.traces = TraceLog(self.store, enabled=trace, clock=clock)
         self._working: Dict[Tuple[Optional[str], Optional[str], Optional[str]], WorkingMemory] = {}
         self._working_max_turns = working_max_turns
-        self._lock = threading.RLock()
+        self._lock = RWLock()  # `with _lock:` = exclusive write; `with _lock.read():` = shared search
         self._indexes: OrderedDict[Tuple[Optional[str], Optional[str]], Tuple[Any, ScopeIndex]] = OrderedDict()
         self._index_cache_size = index_cache_size
+        self._index_cache_max_memories = index_cache_max_memories
         self._index_builds = 0
         self._check_embedder(on_embedder_change)
 
@@ -113,7 +139,9 @@ class Memory:
         if stored is None:
             self.store.set_meta("embedder", self.embedder_signature)
         elif stored != self.embedder_signature:
-            if on_change == "error":
+            # Upgrading the built-in offline embedder is local and cheap, so just migrate.
+            same_family = stored.startswith("hashing-") and self.embedder.name.startswith("hashing-")
+            if on_change == "error" and not same_family:
                 raise EmbedderMismatchError(
                     f"Store was embedded with {stored!r} but this Memory uses {self.embedder_signature!r}. "
                     "Pass on_embedder_change='reembed' to re-embed every memory with the new model."
@@ -144,9 +172,26 @@ class Memory:
         if generation is not None and self._index_cache_size > 0:
             self._indexes[key] = (generation, index)
             self._indexes.move_to_end(key)
-            while len(self._indexes) > self._index_cache_size:
+            while len(self._indexes) > 1 and (
+                    len(self._indexes) > self._index_cache_size
+                    or sum(len(i) for _, i in self._indexes.values()) > self._index_cache_max_memories):
                 self._indexes.popitem(last=False)
         return index
+
+    def _read_index(self, scope: Scope) -> ScopeIndex:
+        """The scope's index for searching. Rank on it inside ``with self._lock.read():``.
+
+        A warm index is returned under a shared lock, so searches run in parallel; only a
+        cold or stale index takes the exclusive lock to (re)build.
+        """
+        key = (scope.user_id, scope.agent_id)
+        with self._lock.read():
+            cached = self._indexes.get(key)
+            generation = self.store.generation() if cached is not None else None
+            if cached is not None and generation is not None and cached[0] == generation:
+                return cached[1]
+        with self._lock:
+            return self._index_for(scope)
 
     def _apply(self, before: Any, upserts: Sequence[MemoryRecord] = (), removes: Sequence[str] = ()) -> None:
         """Patch warm indexes after this process wrote to the store. Caller holds ``self._lock``.
@@ -205,6 +250,35 @@ class Memory:
             self.store.set_meta("embedder", self.embedder_signature)
             self._indexes.clear()
         return len(records)
+
+    def apply_retention(self, policy: Optional[RetentionPolicy] = None) -> int:
+        """Expire memories in *every* scope (run from a scheduled admin job). Returns the count."""
+        policy = policy or self.retention
+        if policy is None:
+            raise ValueError("No retention policy: pass one or create Memory(retention=...)")
+        scopes = {(r.user_id, r.agent_id) for r in self.store.iter_all() if r.status == Status.ACTIVE}
+        return sum(len(self.scope(u, a).apply_retention(policy)) for u, a in sorted(scopes, key=str))
+
+    def export_audit(self, path: Union[str, Path], *, user_id: Optional[str] = None, since: TimeArg = None,
+                     events: Optional[Sequence[str]] = None) -> int:
+        """Write an audit log (JSON lines) of memory events: writes, deletes, retention, forgets...
+
+        Filter by ``user_id``, a ``since`` time, and event names. Returns the number of rows.
+        """
+        start = to_timestamp(since, self.clock())
+        wanted = set(events) if events else None
+        count = 0
+        with open(path, "w", encoding="utf-8") as fh:
+            for trace in self.store.iter_traces():
+                if user_id is not None and trace["user_id"] != user_id:
+                    continue
+                if start is not None and trace["ts"] < start:
+                    continue
+                if wanted is not None and trace["event"] not in wanted:
+                    continue
+                fh.write(json.dumps(trace, default=str) + "\n")
+                count += 1
+        return count
 
     def stats(self) -> Dict[str, Any]:
         by_type: Counter = Counter()
@@ -289,10 +363,35 @@ class ScopedMemory:
     def _active(self, kinds: Optional[Sequence[str]] = None,
                 memory_types: Optional[Sequence[MemoryType]] = None) -> List[MemoryRecord]:
         """Active visible records from the warm index. Read-only: do not mutate the results."""
-        with self._mem._lock:
-            records = [r for _, r in self._mem._index_for(self.scope).items()]
+        if self._mem.candidate_limit is not None:
+            return self._query(memory_types, kinds=kinds)
+        index = self._mem._read_index(self.scope)
+        with self._mem._lock.read():
+            records = [r for _, r in index.items()]
         return [r for r in records if (kinds is None or r.kind in kinds)
                 and (memory_types is None or r.memory_type in memory_types)]
+
+    def _pinned(self) -> List[MemoryRecord]:
+        if self._mem.candidate_limit is not None:
+            return self._store.find_by_metadata(self.scope, "pinned", True)
+        return [r for r in self._active() if r.metadata.get("pinned")]
+
+    def _write_index(self, pending: Sequence[_Pending]) -> ScopeIndex:
+        """Index used to dedupe and detect conflicts while writing. Caller holds the write lock.
+
+        Normally the warm index; in candidate mode a small index of the records the database
+        says could collide with what is being written.
+        """
+        if self._mem.candidate_limit is None:
+            return self._mem._index_for(self.scope)
+        found: Dict[str, MemoryRecord] = {}
+        for p in pending:
+            for r in self._store.candidates(self.scope, p.record.content, p.record.embedding, 20):
+                found.setdefault(r.id, r)
+            if p.record.metadata.get("slot"):
+                for r in self._store.find_by_metadata(self.scope, "slot", p.record.metadata["slot"]):
+                    found.setdefault(r.id, r)
+        return ScopeIndex.build(found.values(), self._mem.embedder.dim)
 
     def _persist(self, *records: MemoryRecord) -> None:
         """Write changed records through to the store and the warm indexes."""
@@ -340,19 +439,31 @@ class ScopedMemory:
         inserts: List[_Pending] = []
         with self._mem._lock:
             before = self._store.generation()
-            index = self._mem._index_for(self.scope)
+            index = self._write_index(pending)
             pending_by_id: Dict[str, MemoryRecord] = {}
+            batch_keys: Dict[str, MemoryRecord] = {}
             changed: List[MemoryRecord] = []
+            contradicted: List[Tuple[MemoryRecord, List[str]]] = []
             try:
                 for p in pending:
                     record = p.record
-                    if key is not None:
-                        existing, superseded = self._upsert_key(record, key)
+                    if record.key is not None:
+                        earlier = batch_keys.get(record.key)
+                        if earlier is not None:  # same key earlier in this batch
+                            if norm(earlier.content) == norm(record.content):
+                                out.append(earlier)
+                                continue
+                            earlier.status, earlier.superseded_by = Status.SUPERSEDED, record.id
+                            index.remove(earlier.id)
+                        existing, superseded = self._upsert_key(record, record.key)
                         changed.extend(superseded)
                         if existing is not None:
                             changed.append(existing)
                             out.append(existing)
                             continue
+                        if superseded and record.key.startswith("slot:"):
+                            contradicted.append((record, [r.id for r in superseded]))
+                        batch_keys[record.key] = record
                     elif self._mem.dedupe_on_write is not None:
                         twin = self._find_twin(index, record, pending_by_id)
                         if twin is not None:
@@ -360,6 +471,18 @@ class ScopedMemory:
                                 changed.append(twin)
                             out.append(twin)
                             continue
+                    if self._mem.contradictions == "flag" and record.metadata.get("slot"):
+                        clashes = [r for _, r in index.items() if r.metadata.get("slot") == record.metadata["slot"]
+                                   and r.metadata.get("slot_value") != record.metadata["slot_value"]
+                                   and self.scope.can_write(r)]
+                        if clashes:
+                            record.metadata["conflicts_with"] = [r.id for r in clashes]
+                            for r in clashes:
+                                fresh = self._store.get(r.id, self.scope)
+                                fresh.metadata.setdefault("conflicts_with", []).append(record.id)
+                                self._store.update(fresh, self.scope)
+                                changed.append(fresh)
+                            contradicted.append((record, [r.id for r in clashes]))
                     inserts.append(p)
                     pending_by_id[record.id] = record
                     clone = _clone(record)
@@ -372,6 +495,9 @@ class ScopedMemory:
                 self._mem._indexes.clear()  # the index may hold records that never reached the store
                 raise
             self._mem._apply(before, upserts=[*changed, *(p.record for p in inserts)])
+        for record, ids in contradicted:
+            self._traces.log("contradiction", self.scope, memory_id=record.id, slot=record.metadata.get("slot"),
+                             others=ids, action=self._mem.contradictions)
         for p in inserts:
             d = p.decision
             self._traces.log("route", self.scope, memory_id=p.record.id, text=p.record.content[:2000],
@@ -384,6 +510,10 @@ class ScopedMemory:
         metadata = dict(metadata or {})
         if pin:
             metadata["pinned"] = True
+        if self._mem.redactor is not None:
+            content, found = self._mem.redactor.redact(content)
+            if found:
+                metadata["redacted"] = found
         decision = self._mem.router.route(content, metadata)
         if memory_type is not None:
             forced = MemoryType.coerce(memory_type)
@@ -400,6 +530,12 @@ class ScopedMemory:
             decision.importance = clamp(importance)
         if self.scope.thread_id and decision.memory_type != MemoryType.EPISODIC:
             metadata.setdefault("source_thread", self.scope.thread_id)
+        if key is None and decision.memory_type == MemoryType.SEMANTIC and self._mem.contradictions != "off":
+            fact = extract_slot(content)
+            if fact is not None:
+                metadata.update(slot=f"{fact.slot}:{fact.subject}", slot_value=fact.value)
+                if self._mem.contradictions == "supersede":
+                    key = fact.key  # versioned like an explicit key: newest value wins, history kept
         record = MemoryRecord(
             content=content, memory_type=decision.memory_type, kind=decision.kind, key=key,
             user_id=self.scope.user_id, agent_id=None if shared else self.scope.agent_id,
@@ -413,7 +549,10 @@ class ScopedMemory:
         superseded: List[MemoryRecord] = []
         now = record.created_at
         for existing in self._store.query(self.scope, key=key, owned_only=True):
-            if norm(existing.content) == norm(record.content) and existing.memory_type == record.memory_type:
+            same_value = existing.metadata.get("slot_value") is not None and \
+                existing.metadata.get("slot_value") == record.metadata.get("slot_value")
+            if (same_value or norm(existing.content) == norm(record.content)) \
+                    and existing.memory_type == record.memory_type:
                 if existing.content == record.content:
                     existing.metadata.update(record.metadata)
                 else:  # case-only difference: keep the original spelling everywhere
@@ -506,39 +645,63 @@ class ScopedMemory:
     # --- Recall -------------------------------------------------------------------
     def search(self, query: str, k: int = 5, *, memory_types: Optional[Sequence[Union[MemoryType, str]]] = None,
                kinds: Optional[Sequence[str]] = None, thread_only: bool = False,
-               min_relevance: Optional[float] = None, relative_cutoff: Optional[float] = None) -> List[SearchResult]:
-        """Most relevant memories for ``query``, ranked by relevance, recency, importance and reuse."""
+               min_relevance: Optional[float] = None, relative_cutoff: Optional[float] = None,
+               since: TimeArg = None, until: TimeArg = None) -> List[SearchResult]:
+        """Most relevant memories for ``query``, ranked by relevance, recency, importance and reuse.
+
+        ``since`` / ``until`` keep only memories created (or last seen) in that window. They take
+        ``"7d"``, ``"24h"``, ``"30m"``, ``"2w"``, a ``datetime``, a ``timedelta`` or epoch seconds.
+        """
         return self._search(query, k=k, memory_types=memory_types, kinds=kinds, thread_only=thread_only,
-                            min_relevance=min_relevance, relative_cutoff=relative_cutoff, touch=True)
+                            min_relevance=min_relevance, relative_cutoff=relative_cutoff, since=since,
+                            until=until, touch=True)
 
     recall = search
 
     def _search(self, query: str, *, k: int, memory_types: Optional[Sequence[Union[MemoryType, str]]] = None,
                 kinds: Optional[Sequence[str]] = None, thread_only: bool = False,
                 min_relevance: Optional[float] = None, relative_cutoff: Optional[float] = None,
-                touch: bool = True) -> List[SearchResult]:
+                since: TimeArg = None, until: TimeArg = None, touch: bool = True) -> List[SearchResult]:
         if thread_only and not self.scope.thread_id:
             raise ValueError("thread_only=True needs a scope with a thread_id")
         types = {MemoryType.coerce(t) for t in memory_types} if memory_types else set(DURABLE_TYPES)
         kind_set = set(kinds) if kinds is not None else None
         thread = self.scope.thread_id
+        now = self._now()
+        start, end = to_timestamp(since, now), to_timestamp(until, now)
 
         def allow(r: MemoryRecord) -> bool:
-            return (r.memory_type in types and (kind_set is None or r.kind in kind_set)
-                    and (not thread_only or r.thread_id == thread))
+            if r.memory_type not in types or (kind_set is not None and r.kind not in kind_set):
+                return False
+            if thread_only and r.thread_id != thread:
+                return False
+            if start is not None or end is not None:
+                seen = max(r.created_at, float(r.metadata.get("last_seen", 0) or 0))
+                if (start is not None and seen < start) or (end is not None and r.created_at > end):
+                    return False
+            return True
 
-        now = self._now()
         query_vec = self._mem._embedder.embed([query])[0]
-        with self._mem._lock:
-            index = self._mem._index_for(self.scope)
-            results = self._mem.retriever.rank_index(query, query_vec, index, now, top_k=k,
-                                                     min_relevance=min_relevance,
-                                                     relative_cutoff=relative_cutoff, allow=allow)
+        if self._mem.candidate_limit is not None:
+            candidates = self._store.candidates(self.scope, query, query_vec, self._mem.candidate_limit)
+            results = self._mem.retriever.rank(query, query_vec, candidates, now, top_k=k,
+                                               min_relevance=min_relevance, relative_cutoff=relative_cutoff,
+                                               allow=allow)
+        else:
+            results = self._ranked(query, query_vec, now, k, min_relevance, relative_cutoff, allow)
         if touch:
             self._mem._touch([r.id for r in results], now)
             self._traces.log("retrieve", self.scope, query=query, k=k,
                              results=[{"id": r.id, "score": round(r.score, 4)} for r in results])
         return results
+
+    def _ranked(self, query: str, query_vec: Sequence[float], now: float, k: int, min_relevance: Optional[float],
+                relative_cutoff: Optional[float], allow: Callable[[MemoryRecord], bool]) -> List[SearchResult]:
+        """Rank on the warm in-process index under a shared lock (searches run in parallel)."""
+        index = self._mem._read_index(self.scope)
+        with self._mem._lock.read():
+            return self._mem.retriever.rank_index(query, query_vec, index, now, top_k=k, min_relevance=min_relevance,
+                                                  relative_cutoff=relative_cutoff, allow=allow)
 
     # --- Reuse --------------------------------------------------------------------
     def context(self, query: str, max_tokens: int = 800, **kwargs: Any) -> ContextCard:
@@ -572,8 +735,37 @@ class ScopedMemory:
         return len(changed)
 
     def refine(self, summarizer: Optional[Summarizer] = None) -> RefineReport:
-        """Dedupe, decay and (with a summarizer such as an LLM call) promote episodes to insights."""
-        return self._mem.refiner.run(self, summarizer)
+        """Dedupe, decay and (with a summarizer such as an LLM call) promote episodes to insights.
+
+        Also applies the Memory's retention policy, if one is set.
+        """
+        report = self._mem.refiner.run(self, summarizer)
+        if self._mem.retention is not None:
+            report.expired = self.apply_retention()
+        return report
+
+    def apply_retention(self, policy: Optional[RetentionPolicy] = None) -> List[str]:
+        """Archive or delete this scope's memories older than the retention policy allows."""
+        policy = policy or self._mem.retention
+        if policy is None:
+            raise ValueError("No retention policy: pass one or create Memory(retention=...)")
+        now = self._now()
+        expired = [r for r in self._store.query(self.scope, memory_types=list(DURABLE_TYPES), owned_only=True)
+                   if policy.expired(r, now)]
+        with self._mem._lock:
+            before = self._store.generation()
+            if policy.action == "delete":
+                for r in expired:
+                    self._store.delete(r.id, self.scope)
+                self._mem._apply(before, removes=[r.id for r in expired])
+            else:
+                for r in expired:
+                    r.status = Status.ARCHIVED
+                    self._store.update(r, self.scope)
+                self._mem._apply(before, upserts=expired)
+        if expired:
+            self._traces.log("retention", self.scope, action=policy.action, memory_ids=[r.id for r in expired])
+        return [r.id for r in expired]
 
     def reclassify(self, record_id: str, memory_type: Union[MemoryType, str],
                    kind: Optional[str] = None) -> MemoryRecord:
@@ -632,7 +824,13 @@ class ScopedMemory:
         return record
 
     def delete(self, record_id: str) -> bool:
-        """Permanently delete one memory this scope owns."""
+        """Permanently delete one memory this scope owns.
+
+        Returns ``False`` for ids this scope can't see, so callers can't probe whether another
+        user's memory exists. Raises ``PermissionDenied`` for visible but read-only (global) records.
+        """
+        if self._store.get(record_id, self.scope) is None:
+            return False
         with self._mem._lock:
             before = self._store.generation()
             deleted = self._store.delete(record_id, self.scope)
@@ -669,7 +867,9 @@ class ScopedMemory:
 
     # --- Sessions -----------------------------------------------------------------
     def add_turn(self, role: str, content: str) -> None:
-        """Append a conversation turn to working memory."""
+        """Append a conversation turn to working memory (redacted when the Memory redacts)."""
+        if self._mem.redactor is not None:
+            content = self._mem.redactor(content)
         self.working.add_turn(role, content, self._now())
 
     def end_session(self, summarizer: Optional[Callable[[str], str]] = None, clear: bool = True) -> List[MemoryRecord]:

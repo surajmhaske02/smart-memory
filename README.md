@@ -1,6 +1,6 @@
 # smart-memory
 
-**Long-term memory for AI agents that uses up to 99% fewer prompt tokens, runs offline, and keeps every user's data separate.**
+**Long-term memory for AI agents that uses up to 99% fewer prompt tokens, runs offline, works in any language, and keeps every user's data separate.**
 
 [![CI](https://github.com/surajmhaske02/smart-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/surajmhaske02/smart-memory/actions/workflows/ci.yml)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
@@ -10,6 +10,9 @@
 Everyone uses the same frontier models. Agents that stand out remember the right things,
 forget the noise, and get better with use. smart-memory gives any agent that memory layer,
 whatever model or framework you use, in plain Python with no required dependencies.
+
+Use it as a Python library, as an **MCP server** for Claude Desktop and Claude Code (no code),
+as a **REST API**, or through **LangChain, LlamaIndex and CrewAI** adapters.
 
 ```python
 from smart_memory import Memory
@@ -30,6 +33,9 @@ Most agents do one of these, and each one costs you:
 | One memory store for everything | "Never share PINs" sits next to "user said hi", with no notion of failures or procedures | **Four stores** (working, episodic, semantic, procedural), with routing done for you |
 | Access checks in the prompt | One prompt injection away from leaking another customer's data | **Isolation enforced in the database query** for every read and write |
 | Static memory | Mistakes repeat; stale facts stay forever | **Learns**: feedback, procedure outcomes, dedupe, decay, and promotion of repeated patterns |
+| Old and new facts both stay | "Lives in Pune" and "moved to Berlin" both reach the prompt | **Contradictions resolved**: the newer fact replaces the older one, with history kept |
+| English-only text handling | Hindi or Marathi memories can't be found | **Any script**: Hindi, Marathi, German, Spanish, Russian and more |
+| Personal data stored as-is | Emails, phone numbers and card numbers sit in the database | **Redaction** before storing, **retention** periods, and an **audit log** |
 
 ## Measured results
 
@@ -38,7 +44,7 @@ From [`benchmarks/`](benchmarks) (synthetic data, default offline embedder; see 
 | | Everything in the prompt | smart-memory |
 |---|---|---|
 | Prompt tokens per turn (1,000 memories per user) | 14,225 | **~105 (‑99%)** |
-| Correct memory in the prompt | 100% | 93% to 97% (with an offline lexical embedder) |
+| Correct memory in the prompt | 100% | **100%** on this benchmark (offline embedder) |
 | Context latency at 20,000 memories | n/a | **17 ms** (44× faster than v0.1) |
 | Embedding calls to ingest 20,000 memories | 20,000 | **1** |
 | Writes that need an LLM router call (cascade) | 100% | **25%** |
@@ -55,7 +61,14 @@ Not on PyPI yet. Install from GitHub:
 pip install "git+https://github.com/surajmhaske02/smart-memory.git"
 ```
 
-Optional: `pip install numpy` makes search about 4× faster. No other dependencies, and no API keys needed.
+No other dependencies and no API keys needed. Optional extras:
+
+| Install | Adds |
+|---|---|
+| `pip install numpy` | About 4× faster search |
+| `pip install fastembed` | Small local neural embedder: matches meaning, works offline, multilingual models available |
+| `pip install "psycopg[binary]"` | PostgreSQL + pgvector backend |
+| `pip install langchain-core` / `llama-index-core` / `crewai` | Framework adapters |
 
 ## Quick start
 
@@ -113,10 +126,74 @@ def chat(memory, user_text):
 ```python
 from smart_memory import MemoryTools
 
-tools = MemoryTools(memory)                    # remember + recall (forget is opt-in)
+tools = MemoryTools(memory)                    # remember, recall, context (forget is opt-in)
 tool_defs = tools.schemas("anthropic")         # or "openai", or "json"
 # ... when the model calls a tool:
 result_json = tools.handle(call.name, call.arguments)
+```
+
+**3. No code: an MCP server** for Claude Desktop, Claude Code, Cursor and other MCP clients:
+
+```bash
+# Claude Code
+claude mcp add smart-memory -- smart-memory mcp --db ~/smart-memory.db --user me
+```
+
+```json
+// Claude Desktop: claude_desktop_config.json
+{
+  "mcpServers": {
+    "smart-memory": {
+      "command": "/full/path/to/smart-memory",
+      "args": ["mcp", "--db", "/Users/you/smart-memory.db", "--user", "me"]
+    }
+  }
+}
+```
+
+The model gets `remember`, `recall` and `context` tools (`--allow-forget` adds `forget`). Each
+server process is bound to one user, so the model can't read anyone else's memory. Use
+`which smart-memory` to find the full path for Claude Desktop.
+
+**4. Any language or service: the REST API and CLI**
+
+```bash
+smart-memory serve --db memory.db --api-key "$SMART_MEMORY_API_KEY"     # http://127.0.0.1:8765
+
+curl -s localhost:8765/v1/context -H "Authorization: Bearer $SMART_MEMORY_API_KEY" \
+  -d '{"user_id": "alice", "query": "How should I contact Alice?"}'
+
+smart-memory add     --db memory.db --user alice "Alice prefers email"
+smart-memory search  --db memory.db --user alice "contact Alice" --since 7d
+smart-memory context --db memory.db --user alice "refund for Alice"
+smart-memory audit   --db memory.db audit.jsonl --user alice
+```
+
+Endpoints: `POST /v1/memories`, `/v1/memories/batch`, `/v1/search`, `/v1/context`, `/v1/feedback`,
+`/v1/forget_user`, `DELETE /v1/memories/<id>`, `GET /health`. The server refuses to listen on a
+public address without an API key.
+
+**5. Your framework**
+
+```python
+from smart_memory.integrations.langchain import SmartMemoryRetriever, SmartMemoryChatHistory, context_message
+from smart_memory.integrations.llamaindex import SmartMemoryLlamaRetriever
+from smart_memory.integrations.crewai import memory_tools
+
+retriever = SmartMemoryRetriever(memory=alice, k=5)        # LangChain retriever
+nodes = SmartMemoryLlamaRetriever(alice).retrieve("...")   # LlamaIndex retriever
+agent = Agent(role="Support", goal="...", backstory="...", tools=memory_tools(alice))  # CrewAI
+```
+
+**6. Async code**
+
+```python
+from smart_memory.aio import AsyncMemory
+
+mem = AsyncMemory("agent.db")
+alice = mem.scope(user_id="alice")
+await alice.add("Alice prefers email")
+card = await alice.context("How do I contact Alice?")
 ```
 
 ## Core ideas
@@ -209,6 +286,60 @@ for hit in alice.search("peanut allergy", k=5, memory_types=["semantic"]):
 
 A memory has to be actually relevant (`min_relevance`) before importance or recency can
 lift it, so important but unrelated memories never reach the prompt.
+
+**Time windows.** `since` and `until` take `"30m"`, `"24h"`, `"7d"`, `"2w"`, a date like
+`"2026-11-01"`, a `datetime` or a `timedelta`, and work on `context()` too:
+
+```python
+alice.search("deploy failed", since="7d")
+alice.context("what went wrong this week?", since="7d")
+```
+
+**Any language.** Words in any script are kept whole, so Hindi, Marathi, German, Spanish or
+Russian memories are searchable. Hindi and Marathi phrases are also routed correctly
+("कल पेमेंट API फेल हो गया" becomes an episodic failure). For questions in one language
+matching memories in another, use a multilingual embedder such as
+`FastEmbedEmbedder("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")`.
+</details>
+
+<details>
+<summary><b>Contradictions: newer facts replace older ones</b></summary>
+
+```python
+alice.add("Alice lives in Pune")
+alice.add("Alice moved to Berlin")          # replaces Pune automatically
+alice.search("where does Alice live")       # -> "Alice moved to Berlin"
+alice.history("slot:location:alice")        # both versions, newest first
+```
+
+Recognised out of the box: where someone lives, employer, email, phone, manager, plan, age
+and timezone, in English plus common Hindi and Marathi forms. Add your own with
+`smart_memory.contradictions.register_slot(name, regex)`. Choose the behaviour with
+`Memory(contradictions="supersede" | "flag" | "off")`. `"flag"` keeps both facts and marks
+them with `conflicts_with`.
+</details>
+
+<details>
+<summary><b>Governance: redaction, retention, audit</b></summary>
+
+```python
+from smart_memory import Memory
+from smart_memory.governance import Redactor, RetentionPolicy
+
+mem = Memory(
+    "agent.db",
+    redact=True,   # or Redactor(kinds=["email", "phone"], custom={"EMPLOYEE_ID": r"\bEMP-\d{5}\b"})
+    retention=RetentionPolicy({"episodic": 90, "kind:turn": 7}, action="delete"),
+)
+mem.apply_retention()                                   # e.g. from a nightly job, all users
+mem.export_audit("audit.jsonl", user_id="alice", since="30d")
+```
+
+Redaction runs before anything is embedded or stored, so raw identifiers never reach the
+database, the vectors, the traces or a prompt. Built-in detectors: email, phone (India,
+international, US formats), payment card (Luhn-checked), Aadhaar (checksum-verified), PAN,
+SSN, IBAN, IP address, and API keys. Pinned memories never expire. `forget_user()` deletes
+everything a user owns.
 </details>
 
 <details>
@@ -285,17 +416,35 @@ write never fails because of the model.
 
 ```python
 from smart_memory import FunctionEmbedder, SentenceTransformerEmbedder
+from smart_memory.embeddings import FastEmbedEmbedder
 
+mem = Memory("agent.db", embedder=FastEmbedEmbedder())                # pip install fastembed (offline, ONNX)
 mem = Memory("agent.db", embedder=SentenceTransformerEmbedder())     # pip install sentence-transformers
 mem = Memory("agent.db", embedder=FunctionEmbedder(my_embed_fn, dim=1536, name="my-model"))
 ```
 
+With `FastEmbedEmbedder`, "what did Priya buy?" finds "Priya purchased a new laptop", which a
+word-matching embedder can't do.
+
 The store records which embedder built it. Switching to a different one raises an error
 unless you pass `on_embedder_change="reembed"`.
 
-**Storage.** SQLite (default) and in-memory are built in. For Postgres/pgvector, Oracle,
-MongoDB or Redis, subclass `StorageBackend` (about ten methods), apply `Scope` checks in
-your queries, and run [`tests/test_storage_contract.py`](tests/test_storage_contract.py)
+**Storage.** SQLite (default), in-memory and PostgreSQL are built in.
+
+```python
+from smart_memory.storage.postgres import PostgresStore   # pip install "psycopg[binary]"
+
+store = PostgresStore("postgresql://user:pass@host/db")
+mem = Memory(store=store)                         # many processes share one database
+mem = Memory(store=store, candidate_limit=200)    # very large scopes: pgvector + full-text pick candidates
+```
+
+Every process notices the others' writes. With the pgvector extension, embeddings also get
+an HNSW index. `candidate_limit` lets the database pre-select candidates for each search
+instead of loading the whole scope into RAM.
+
+For Oracle, MongoDB or Redis, subclass `StorageBackend` (about ten methods), apply `Scope`
+checks in your queries, and run [`tests/test_storage_contract.py`](tests/test_storage_contract.py)
 against it. Those tests check user isolation for you.
 
 ## Production checklist
@@ -305,14 +454,18 @@ against it. Those tests check user isolation for you.
 - Pin always-needed facts and send `render_split()`'s stable part as a cached prefix.
 - Keep 2 to 4 recent turns and let memory cover the rest of the history.
 - Check `mem.cache_info()` and the routing traces from time to time.
+- Turn on `redact=True` and a `RetentionPolicy` if users may share personal data.
+- Several processes or servers: use `PostgresStore`. Very large users: add `candidate_limit`.
 
 The [cost and performance guide](docs/OPTIMIZATION.md) has presets, measurements and the cost math.
 
 ## Limits
 
-- Ranking scans every memory in the scope. With numpy that's fine up to roughly 50k memories per user and agent; beyond that, use a vector-database backend.
+- With the in-process index, ranking scans every memory in the scope: fine up to roughly 50k memories per user and agent with numpy. Beyond that, use `PostgresStore` with `candidate_limit`.
+- Searches don't block each other, but CPU-bound ranking in pure Python is limited by Python's GIL (global interpreter lock). For CPU parallelism, run several worker processes or use free-threaded Python. Waiting on an embedding API does run in parallel.
 - The warm index lives in each process. Writes from other processes are detected and trigger a rebuild, but each process keeps its own copy.
-- The default embedder matches words, not meaning ("buy" won't find "bought"). Use a neural embedder when that matters.
+- The default embedder matches words (with irregular verbs such as "bought" → "buy"), not meaning. Use `FastEmbedEmbedder` or another neural embedder when paraphrases matter.
+- Contradiction detection covers common single-valued facts, not every possible conflict.
 - Working memory is per process; persist it with `end_session()`.
 
 ## Contributing
@@ -322,17 +475,17 @@ self-contained, with a clear interface and existing tests to follow:
 
 | Area | Idea | Where |
 |---|---|---|
-| Storage | Postgres + pgvector, MongoDB, Redis backend | `smart_memory/storage/`, contract tests included |
-| Speed | Optional ANN index (hnswlib or FAISS) | `smart_memory/index.py` |
-| Quality | Small ONNX embedder extra; learned ranking weights from traces | `embeddings.py`, `retrieval.py` |
-| Developer experience | `AsyncMemory`, LangChain/LlamaIndex adapters, a CLI | new modules |
+| Storage | MongoDB, Redis or Oracle backend | `smart_memory/storage/`, contract tests included |
+| Speed | Optional in-process ANN index (hnswlib or FAISS) | `smart_memory/index.py` |
+| Quality | Learned ranking weights from traces; more contradiction slots and languages | `retrieval.py`, `contradictions.py`, `router.py` |
+| Integrations | AutoGen, Haystack and Semantic Kernel adapters; a CrewAI storage backend | `smart_memory/integrations/` |
 | Evaluation | Real-world memory benchmarks | `benchmarks/` |
 
 ```bash
 git clone https://github.com/surajmhaske02/smart-memory.git && cd smart-memory
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]" numpy
-pytest            # 141 tests, under a second
+pytest            # 220+ tests in a few seconds (Postgres and framework tests run when those are installed)
 ruff check smart_memory tests
 ```
 

@@ -63,6 +63,10 @@ class StorageBackend(ABC):
     def touch(self, record_ids: Sequence[str], timestamp: float) -> None:
         """Bump access_count and last_accessed_at (the "reuse" signal)."""
 
+    def find_by_metadata(self, scope: Scope, key: str, value: Any) -> List[MemoryRecord]:
+        """Active visible records whose ``metadata[key] == value``. Override with an indexed query."""
+        return [r for r in self.query(scope) if r.metadata.get(key) == value]
+
     def generation(self) -> Optional[Any]:
         """A token that changes whenever stored records change (``touch`` excluded).
 

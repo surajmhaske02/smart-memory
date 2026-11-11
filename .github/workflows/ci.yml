@@ -18,9 +18,50 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
-      - run: ruff check smart_memory tests
+      - run: ruff check smart_memory tests benchmarks examples
       - run: pytest --cov=smart_memory --cov-report=term-missing
       - name: Test again with the numpy fast path
         run: pip install numpy && pytest -q
       - run: python examples/quickstart.py
       - run: python benchmarks/benchmark.py --per-user 200
+      - run: smart-memory --version
+
+  postgres-and-integrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      SMART_MEMORY_TEST_PG_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev,postgres,langchain,llamaindex]" numpy crewai mcp
+      - name: Postgres + pgvector, storage contract, framework adapters
+        run: pytest -q -rs tests/test_postgres.py tests/test_storage_contract.py tests/test_integrations.py
+      - name: Whole suite on Postgres-capable environment
+        run: pytest -q
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check --strict dist/*
+      - name: Install the built wheel and smoke-test it
+        run: |
+          python -m venv /tmp/wheel-venv
+          /tmp/wheel-venv/bin/pip install dist/*.whl
+          cd /tmp && /tmp/wheel-venv/bin/smart-memory --version
+          /tmp/wheel-venv/bin/python -c "from smart_memory import Memory; s = Memory().scope('u'); s.add('Alice likes tea'); assert s.search('tea')"

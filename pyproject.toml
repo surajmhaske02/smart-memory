@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-memory"
-version = "0.2.0"
+version = "0.3.0"
 description = "Governed, four-store memory for AI agents: retain, recall, reuse, refine."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,9 +20,21 @@ classifiers = [
 ]
 dependencies = []
 
+[project.scripts]
+smart-memory = "smart_memory.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/surajmhaske02/smart-memory"
+Issues = "https://github.com/surajmhaske02/smart-memory/issues"
+Changelog = "https://github.com/surajmhaske02/smart-memory/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
-local = ["sentence-transformers>=2.2"]
 fast = ["numpy>=1.21"]
+local = ["sentence-transformers>=2.2"]
+fastembed = ["fastembed>=0.3"]
+postgres = ["psycopg[binary]>=3.1"]
+langchain = ["langchain-core>=0.2"]
+llamaindex = ["llama-index-core>=0.10"]
 dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.4"]
 
 [tool.setuptools.packages.find]
@@ -33,6 +45,7 @@ smart_memory = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning:langsmith.*"]
 
 [tool.ruff]
 line-length = 120

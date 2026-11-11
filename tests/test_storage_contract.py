@@ -3,6 +3,7 @@
 import threading
 
 import pytest
+from pg_support import make_store, pg_dsn
 
 from smart_memory import InMemoryStore, MemoryRecord, MemoryType, PermissionDenied, Scope, SQLiteStore, Status
 
@@ -11,12 +12,16 @@ BACKENDS = {
     "sqlite-memory": lambda tmp_path: SQLiteStore(":memory:"),
     "sqlite-file": lambda tmp_path: SQLiteStore(str(tmp_path / "mem.db")),
 }
+if pg_dsn():
+    BACKENDS["postgres"] = lambda tmp_path: make_store()
 
 
 @pytest.fixture(params=sorted(BACKENDS))
 def store(request, tmp_path):
     s = BACKENDS[request.param](tmp_path)
     yield s
+    if hasattr(s, "drop_tables"):
+        s.drop_tables()
     s.close()
 
 

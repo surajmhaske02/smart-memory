@@ -134,8 +134,11 @@ class ScopeIndex:
             return {}
         if self.use_numpy:
             n = len(self.records)
-            sims = self._matrix[:n] @ _np.asarray(query_vec, dtype=_np.float32)
-            hits = _np.nonzero(self._alive[:n] & (sims >= max(floor, 1e-9)))[0]
+            # Apple's Accelerate BLAS (some numpy 2.x builds) raises spurious floating-point flags
+            # in matmul even for finite inputs; the values are correct, and non-finite ones are dropped.
+            with _np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                sims = self._matrix[:n] @ _np.asarray(query_vec, dtype=_np.float32)
+            hits = _np.nonzero(self._alive[:n] & _np.isfinite(sims) & (sims >= max(floor, 1e-9)))[0]
             return {int(i): float(sims[i]) for i in hits}
         q = array("f", query_vec)
         out = {}
@@ -148,8 +151,10 @@ class ScopeIndex:
 
     def similarity(self, slot: int, query_vec: Sequence[float]) -> float:
         if self.use_numpy:
-            return max(0.0, float(self._matrix[slot] @ _np.asarray(query_vec, dtype=_np.float32))) \
-                if self._alive[slot] else 0.0
+            if not self._alive[slot]:
+                return 0.0
+            with _np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                return max(0.0, float(self._matrix[slot] @ _np.asarray(query_vec, dtype=_np.float32)))
         vec = self._vectors[slot]
         return max(0.0, _dot(vec, array("f", query_vec))) if vec is not None else 0.0
 
@@ -157,7 +162,8 @@ class ScopeIndex:
         if self.use_numpy:
             if not (self._alive[a] and self._alive[b]):
                 return 0.0
-            return float(self._matrix[a] @ self._matrix[b])
+            with _np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+                return float(self._matrix[a] @ self._matrix[b])
         va, vb = self._vectors[a], self._vectors[b]
         return _dot(va, vb) if va is not None and vb is not None else 0.0
 

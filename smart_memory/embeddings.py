@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import math
 import threading
+from array import array
 from collections import OrderedDict
 from typing import Callable, List, Optional, Protocol, Sequence, runtime_checkable
 
@@ -53,7 +54,8 @@ class HashingEmbedder:
         if dim < 16:
             raise ValueError("dim must be >= 16")
         self.dim = dim
-        self.name = f"hashing-v1-{dim}"
+        # v2: Unicode-aware tokens (Hindi, Marathi, accented Latin...) and irregular-verb lemmas.
+        self.name = f"hashing-v2-{dim}"
         self._weights = (word_weight, bigram_weight, char_weight)
 
     def _bucket(self, feature: str) -> tuple:
@@ -130,7 +132,7 @@ class CachedEmbedder:
         self.name = inner.name
         self.dim = inner.dim
         self.maxsize = maxsize
-        self._cache: OrderedDict[str, Vector] = OrderedDict()
+        self._cache: OrderedDict[str, array] = OrderedDict()  # float32: ~6x smaller than float lists
         self._lock = threading.Lock()
         self.hits = self.misses = self.calls = 0
 
@@ -148,14 +150,34 @@ class CachedEmbedder:
             with self._lock:
                 self.calls += 1
                 for text, vec in zip(missing, vectors):
-                    found[text] = vec
-                    self._cache[text] = vec
+                    found[text] = self._cache[text] = array("f", vec)
                 while len(self._cache) > self.maxsize:
                     self._cache.popitem(last=False)
         with self._lock:
             self.misses += len(missing)
             self.hits += len(texts) - len(missing)
-        return [list(found[t]) for t in texts]
+        return [found[t].tolist() for t in texts]
+
+
+class FastEmbedEmbedder:
+    """Small local neural embeddings via ``fastembed`` (ONNX, no PyTorch): ``pip install fastembed``.
+
+    Matches meaning, not just words ("buy" ~ "purchase"), fully offline after a one-time model
+    download (~30-120 MB). For Hindi, Marathi and other languages use a multilingual model,
+    e.g. ``FastEmbedEmbedder("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")``.
+    """
+
+    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5", **kwargs: object) -> None:
+        try:
+            from fastembed import TextEmbedding
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise ImportError("FastEmbedEmbedder needs fastembed: pip install fastembed") from exc
+        self._model = TextEmbedding(model_name=model_name, **kwargs)
+        self.dim = len(next(iter(self._model.embed(["dimension probe"]))))
+        self.name = f"fastembed-{model_name}"
+
+    def embed(self, texts: Sequence[str]) -> List[Vector]:
+        return [normalize([float(x) for x in v]) for v in self._model.embed(list(texts))]
 
 
 class SentenceTransformerEmbedder:

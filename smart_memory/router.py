@@ -66,7 +66,35 @@ _SEMANTIC: List[Tuple[re.Pattern, float, str]] = [
     )],
 ]
 
-_IMPORTANCE_BOOST = _rx(r"\b(important|critical|remember|never forget|crucial|must|always|urgent)\b")
+# Hindi / Marathi cues. Python's \b is unreliable around Devanagari vowel signs, so words
+# are delimited by whitespace or punctuation (including the danda "।") instead.
+_D = r"(?:^|(?<=[\s,.!?।\"'(]))"
+_E = r"(?=$|[\s,.!?।\"')])"
+
+
+def _ind(*alternatives: str) -> re.Pattern:
+    return re.compile(_D + "(?:" + "|".join(alternatives) + ")" + _E)
+
+
+_PROCEDURAL += [
+    (_ind("हमेशा", "कभी नहीं", "कभी भी नहीं", "ज़रूर", "जरूर", "नेहमी", "कधीही", "करना चाहिए", "करू नका",
+          "मत करो", "मत करना", "करावे", "करावा"), 2.0, "instruction"),
+    (_ind("सबसे पहले", "चरण", "स्टेप", "प्रक्रिया", "आधी", "नंतर", "फिर"), 1.0, "procedure"),
+]
+_EPISODIC += [
+    (_ind("फेल", "असफल", "विफल", "त्रुटि", "एरर", "अयशस्वी", "अपयशी", "बंद पड़", "टाइमआउट"), 2.5, "failure"),
+    (_ind("कल", "आज", "परसों", "पिछले हफ्ते", "पिछले महीने", "काल", "परवा", "गेल्या आठवड्यात", "पूछा", "कहा",
+          "भेजा", "किया", "गया", "गई", "गए", "हुआ", "हुई", "केले", "केला", "पाठवले", "विचारले", "झाले"),
+     1.5, "event"),
+]
+_SEMANTIC += [
+    (_ind("पसंद", "नापसंद", "आवडते", "आवडतो", "आवडत", "प्रिय", "चाहिए", "हवे", "हवा"), 2.0, "preference"),
+    (_ind("मतलब", "अर्थ", "म्हणजे"), 2.0, "definition"),
+    (_ind("रहता", "रहती", "रहते", "राहतो", "राहते", "काम करता", "काम करती", "करतो", "करते"), 1.0, "fact"),
+]
+
+_IMPORTANCE_BOOST = [*_rx(r"\b(important|critical|remember|never forget|crucial|must|always|urgent)\b"),
+                     _ind("ज़रूरी", "जरूरी", "महत्वपूर्ण", "याद रखें", "महत्त्वाचे", "लक्षात ठेवा", "हमेशा", "नेहमी")]
 
 _BASE_IMPORTANCE = {
     "failure": 0.7, "instruction": 0.75, "procedure": 0.7, "preference": 0.7,

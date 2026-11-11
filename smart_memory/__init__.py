@@ -23,7 +23,7 @@ from .traces import TraceLog
 from .types import MemoryRecord, MemoryType, RoutingDecision, Scope, SearchResult, Status
 from .working import WorkingMemory
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "Memory", "ScopedMemory", "EmbedderMismatchError",

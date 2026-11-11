@@ -66,7 +66,22 @@ Bulk ingest stays around 10,000 memories/s even with dedupe on. The dedupe check
 compares a new memory with stored ones that share its two rarest terms, so it doesn't
 slow down as memory grows.
 
-### 2.4 Safer merging
+### 2.4 Memory use and concurrency (v0.3)
+
+| | v0.2 | v0.3 |
+|---|---|---|
+| RAM for 5,000 memories (index + embedding cache) | ~73 MB | **~29 MB** (float32 cache) |
+| RAM cap across warm indexes | 64 indexes, any size | `index_cache_max_memories` (default 500,000) |
+| 4 threads searching while waiting on a slow embedding API (40 searches) | already parallel (embedding ran outside the lock) | **0.36 s** vs 1.38 s on 1 thread |
+| 4 threads, pure CPU ranking | serialized by one lock | no lock contention, but limited by Python's GIL |
+
+For CPU-heavy search traffic, run several worker processes (`PostgresStore` keeps them in
+sync) or use free-threaded Python.
+
+For very large users, `Memory(store=PostgresStore(...), candidate_limit=200)` asks pgvector
+and Postgres full-text search for candidates instead of holding the whole scope in RAM.
+
+### 2.5 Safer merging
 
 Neural embedders put "Order 1234 failed" and "Order 1235 failed" very close together, and
 the same goes for "likes tea" and "doesn't like tea". Dedupe, both on write and in

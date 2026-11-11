@@ -140,8 +140,8 @@ def test_scoping_end_to_end(mem):
     assert [r.content for r in alice_sales.search("morning meetings")] == ["Alice prefers morning meetings"]
     assert alice_sales.search("PIN hint dog") == []
     assert bob.glossary.lookup("sla").definition.startswith("Service level")
-    with pytest.raises(PermissionDenied):
-        bob.delete(secret.id)
+    assert bob.delete(secret.id) is False  # invisible: reported as missing, not "forbidden"
+    assert alice_support.get(secret.id) is not None
     sla = org.glossary.lookup("SLA")
     with pytest.raises(PermissionDenied):
         bob.delete(sla.id)
@@ -235,11 +235,22 @@ def test_persistence_and_embedder_mismatch(tmp_path):
         m.scope("alice").add("Alice speaks Marathi and English")
     with Memory(path) as m:
         assert m.scope("alice").search("Marathi")[0].content == "Alice speaks Marathi and English"
+    other = FunctionEmbedder(lambda texts: [[1.0, float(len(t))] for t in texts], dim=2, name="other-model")
     with pytest.raises(EmbedderMismatchError):
-        Memory(path, embedder=HashingEmbedder(dim=64))
-    with Memory(path, embedder=HashingEmbedder(dim=64), on_embedder_change="reembed") as m:
+        Memory(path, embedder=other)
+    with Memory(path, embedder=other, on_embedder_change="reembed") as m:
         hit = m.scope("alice").search("Marathi")[0]
-        assert len(hit.record.embedding) == 64
+        assert len(hit.record.embedding) == 2
+
+
+def test_builtin_embedder_upgrades_migrate_automatically(tmp_path):
+    path = str(tmp_path / "agent.db")
+    with Memory(path) as m:
+        m.scope("alice").add("Alice speaks Marathi and English")
+        m.store.set_meta("embedder", "hashing-v1-512:512")  # a database written by v0.2
+    with Memory(path, embedder=HashingEmbedder(dim=64)) as m:  # no error: local re-embed
+        assert m.embedder_signature == m.store.get_meta("embedder")
+        assert len(m.scope("alice").search("Marathi")[0].record.embedding) == 64
 
 
 def test_custom_embedder_and_store():
